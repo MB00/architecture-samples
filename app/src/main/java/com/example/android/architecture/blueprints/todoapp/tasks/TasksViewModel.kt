@@ -15,6 +15,7 @@
  */
 package com.example.android.architecture.blueprints.todoapp.tasks
 
+import android.os.CountDownTimer
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
 import androidx.lifecycle.LiveData
@@ -25,6 +26,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.distinctUntilChanged
 import androidx.lifecycle.switchMap
 import androidx.lifecycle.viewModelScope
+import androidx.databinding.ObservableBoolean
+import androidx.databinding.ObservableField
 import com.example.android.architecture.blueprints.todoapp.Event
 import com.example.android.architecture.blueprints.todoapp.R
 import com.example.android.architecture.blueprints.todoapp.data.Result
@@ -93,6 +96,10 @@ class TasksViewModel(
     val empty: LiveData<Boolean> = Transformations.map(_items) {
         it.isEmpty()
     }
+
+    private val taskTimerMap = HashMap<String, CountDownTimer>()
+    val taskDeletionMap = HashMap<String, ObservableBoolean>()
+    val taskDeletionTimeMap = HashMap<String, ObservableField<String>>()
 
     init {
         // Set initial state
@@ -222,7 +229,10 @@ class TasksViewModel(
         // We filter the tasks based on the requestType
         for (task in tasks) {
             when (filteringType) {
-                ALL_TASKS -> tasksToShow.add(task)
+                ALL_TASKS -> {
+                    tasksToShow.add(task)
+                    setupTaskDeletionTimer(task.id)
+                }
                 ACTIVE_TASKS -> if (task.isActive) {
                     tasksToShow.add(task)
                 }
@@ -232,7 +242,59 @@ class TasksViewModel(
             }
         }
         return tasksToShow
+    }
+
+    private fun setupTaskDeletionTimer(taskId: String) {
+        // with taskId as the key, store an ObservableBoolean observed by task_item.xml
+        // using this, we observe if the 'DELETE' / 'UNDO' buttons have been pressed on a task, and toggle their visibility
+        // this also toggles visibility of the timer countdown
+        if (!taskDeletionMap.containsKey(taskId)) {
+            taskDeletionMap[taskId] = ObservableBoolean(false)
         }
+
+        // create and store a new CountDownTimer for each unique taskId
+        // in this way, we ensure that every task maintains its own countdown
+        // for each tick, we display the seconds remaining, and if the countdown finishes, we delete the task
+        if (!taskTimerMap.containsKey(taskId)) {
+            taskTimerMap[taskId] = object : CountDownTimer(3000,1000) {
+                override fun onFinish() {
+                    viewModelScope.launch {
+                        tasksRepository.deleteTask(taskId)
+                    }
+                }
+
+                override fun onTick(millisUntilFinished: Long) {
+                    // tick time varies, and each tick can display as a slightly lower value than expected
+                    // in the case of the round number we expect, we simply divide by 1000 and return seconds
+                    // in the case of a lower value than expected, we divide by 1000 and add 1 to return proper seconds
+                    val secondsRemaining = when {
+                        millisUntilFinished % 10 == 0L -> millisUntilFinished / 1000
+                        else -> millisUntilFinished / 1000 + 1
+                    }
+                    taskDeletionTimeMap[taskId]?.set(secondsRemaining.toString())
+                }
+            }
+        }
+
+        // with taskId as the key, store an ObservableField observed by task_item.xml
+        // using this, we observe if the tick time has changed in the timer
+        // if it has, we decrease the remaining time displayed by one second
+        if (!taskDeletionTimeMap.containsKey(taskId)) {
+            taskDeletionTimeMap[taskId] = ObservableField()
+        }
+    }
+
+    // show 'UNDO' button plus timer countdown in task_item.xml and start the timer tied to the unique taskId
+    fun markTaskForDeletion(taskId: String) {
+        taskDeletionMap[taskId]?.set(true)
+        taskTimerMap[taskId]?.start()
+    }
+
+    // show 'DELETE' button in task_item.xml and cancel the timer tied to the unique taskId
+    fun undoMarkTaskForDeletion(taskId: String) {
+        taskDeletionMap[taskId]?.set(false)
+        taskTimerMap[taskId]?.cancel()
+    }
 
     fun refresh() {
         _forceUpdate.value = true
